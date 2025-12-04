@@ -371,6 +371,179 @@ Computed time-aware in `04_tenant_history_features`: for each VM, we look at **o
 
 ---
 
+### Feature availability for **new incoming VMs**
+
+For modeling “**will this new VM be critical?**” at request time, it’s crucial to separate:
+
+- Features that are **available at VM arrival time** (what the scheduler can reasonably know)
+- Features that are **post-hoc / offline only**, because they use the *future behavior of that VM* (and are used only to build labels or analyze behavior)
+
+Below we list **every column** in `vm_request_table_with_split.parquet` and classify it.
+
+---
+
+#### Features we conceptually HAVE at VM arrival time
+
+These can be known when the VM is requested, **without looking into that VM’s future**. Some are direct inputs, some are simple transforms, some are history over prior VMs of the same tenant.
+
+**Identifiers & timing**
+
+- `vm_id`  
+  Unique VM identifier (we will **not** use as a predictive feature, but it exists).
+- `subscription_id`  
+  Tenant/user ID; used to define history, and can be used as a grouping key (not as a raw feature).
+- `deployment_id`  
+  Deployment/job ID (batch of VMs requested together).
+- `ts_vm_created`  
+  Request time (seconds since window start).
+- `day_idx`  
+  Day index derived from `ts_vm_created` (0–29).
+- `hour_of_day`  
+  Hour-of-day derived from `ts_vm_created` (0–23).
+
+**Static VM config & deployment metadata**
+
+- `vm_category`  
+  Application class: `"Delay-insensitive"`, `"Interactive"`, `"Unknown"`.  
+  Assumed to be known metadata if Azure tags workloads.
+- `vm_virtual_core_count`  
+  Number of virtual cores for this VM.
+- `vm_memory_gb`  
+  Requested memory (GB).
+- `vm_mem_per_core`  
+  Derived: `vm_memory_gb / vm_virtual_core_count` (with core count clipped ≥ 1).
+- `deployment_size`  
+  Number of VMs in this deployment (known from the deployment spec).
+- `log_deployment_size`  
+  Transform: `log(1 + deployment_size)`.
+
+**Tenant “static” info (from past activity)**
+
+These come from **all VMs created so far** for the subscription (conceptually available from historical logs):
+
+- `ts_first_vm_created`  
+  Time of the first VM for this subscription (within the trace window).
+- `count_vms_created`  
+  Total number of VMs created for this subscription (up to “now” conceptually).
+- `sub_first_day`  
+  Day index of `ts_first_vm_created`.
+- `sub_first_hour`  
+  Hour-of-day of `ts_first_vm_created`.
+
+**Tenant history features (based only on previous VMs)**
+
+These are computed from **prior VMs of the same `subscription_id`**, not from the future of the *current* VM. Conceptually, a real system could maintain these online using historical telemetry:
+
+- `hist_n_vms`  
+  Number of **previous** VMs for this tenant.
+- `hist_n_critical`  
+  Number of previous VMs that were labeled `critical` (based on their full history).
+- `hist_has_past`  
+  Indicator (0/1) for whether this tenant has any history (`hist_n_vms > 0`).
+- `hist_critical_frac`  
+  Fraction of previous VMs that were critical.
+- `hist_lifetime_mean`  
+  Mean lifetime (hours) of previous VMs.
+- `hist_lifetime_std`  
+  Std dev of lifetime (hours) of previous VMs.
+- `hist_cpu_mean_mean`  
+  Mean `cpu_mean` over previous VMs.
+- `hist_p95_mean`  
+  Mean `p95_max_cpu` over previous VMs.
+- `hist_frac_gt60_mean`  
+  Mean `cpu_frac_gt_60` over previous VMs.
+- `hist_day_night_ratio_mean`  
+  Mean `day_night_ratio` over previous VMs.
+
+> **Note:** In the offline trace, these history features are computed using the full 30-day window. For a real scheduler, they would be maintained incrementally from past logs. For modeling, we treat them as **arrival-time features** because they never use the future of the *current* VM.
+
+---
+
+#### Features we do NOT have at arrival time (offline/post-hoc)
+
+These depend on the **observed behavior of this VM during the window** and are **not available** when the VM is first requested. They are used to:
+
+- define the label `critical`, and/or
+- inspect behavior offline
+
+but **must not** be used as predictive features for “new incoming VM” models.
+
+**This VM’s future lifecycle**
+
+- `ts_vm_deleted`  
+  Deletion time (end of VM life).
+- `lifetime_sec`  
+  Duration in seconds (`ts_vm_deleted - ts_vm_created`).
+- `lifetime_hours`  
+  Duration in hours.
+
+**This VM’s aggregated CPU usage**
+
+All of these require observing the VM’s CPU time series over its life:
+
+- `max_cpu`  
+  Coarse max CPU from `vmtable` over the VM’s lifetime.
+- `avg_cpu`  
+  Coarse average CPU from `vmtable`.
+- `p95_max_cpu`  
+  p95 of max CPU (over this VM’s life).
+- `n_readings`  
+  Number of CPU samples for this VM in `vm_cpu`.
+- `max_cpu_right`  
+  Max of per-reading `max_cpu` from `vm_cpu` logs.
+- `cpu_mean`  
+  Mean `avg_cpu` over all readings for this VM.
+- `cpu_std`  
+  Std dev of `avg_cpu` over this VM’s readings.
+- `cpu_frac_gt_60`  
+  Fraction of readings with `avg_cpu > 60%` for this VM.
+- `cpu_frac_gt_80`  
+  Fraction of readings with `avg_cpu > 80%` for this VM.
+
+**This VM’s diurnal / hourly pattern**
+
+These features summarize **the VM’s own** time-of-day behavior; they are inherently post-hoc:
+
+- `day_cpu_mean`  
+  Mean CPU during “day” hours for this VM.
+- `night_cpu_mean`  
+  Mean CPU during “night” hours for this VM.
+- `day_night_ratio`  
+  `day_cpu_mean / (night_cpu_mean + ε)` for this VM.
+- `cpu_hour_0_mean` … `cpu_hour_23_mean` (24 columns)  
+  Mean CPU in each hour-of-day bucket for this VM.
+
+**Label components & label**
+
+Derived directly from this VM’s full life; **targets**, not inputs:
+
+- `long_lived`  
+  Boolean flag (e.g. `lifetime_hours >= 24`).
+- `sustained_high`  
+  Boolean: high `cpu_frac_gt_60` and/or high `p95_max_cpu`.
+- `strong_diurnal`  
+  Boolean: strong `day_night_ratio` and high `day_cpu_mean`.
+- `critical`  
+  Final label: `1` if `long_lived & sustained_high & strong_diurnal`, else `0`.
+
+**Split metadata**
+
+- `split`  
+  `"train"`, `"val"`, or `"test"` based on `day_idx`.  
+  This exists only in the offline dataset to define **evaluation splits** and is **never** a model feature.
+
+---
+
+#### Summary for modeling
+
+- **Use as features for new incoming VMs:**  
+  Static config, deployment info, request time, and **tenant history** (`hist_*`, `count_vms_created`, etc.).
+- **Do *not* use as features:**  
+  Anything that summarizes the **future behavior of this VM** (`lifetime_*`, `cpu_mean`, `cpu_frac_gt_*`, `day_*`, `cpu_hour_*`, label comps, `critical`, `split`).
+
+When building new models, always construct your feature list from the ✅ group above to avoid label leakage and to match the “predict at VM arrival” scenario.
+
+
 ## Quick usage example
 
 ```python
