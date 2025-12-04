@@ -3,3 +3,6 @@
 /preprocess/data_raw/
 /preprocess/data_intermediate/
 /data_final
+
+# models artifacts
+/models/artifacts/
