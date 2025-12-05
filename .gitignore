@@ -6,6 +6,7 @@
 
 # models artifacts
 /models/artifacts/
+/model/best_model.pth
 
 # catboost
 /models/catboost_info/
