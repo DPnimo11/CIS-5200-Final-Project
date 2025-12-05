@@ -252,7 +252,7 @@ From fully aggregated `vm_cpu` readings (our `vm_usage_agg`):
   * **Type:** `float64` (percent)
   * **Range:** `[0, 100]`
   * **Definition:** mean `avg_cpu` for each hour of day (UTC) across the VM’s life.
-  * **Role:** fine-grained diurnal profile.
+  * **Role:** fine-grained diurnal profile (also used to derive periodicity).
 
 ---
 
@@ -273,19 +273,26 @@ These are computed in `03_build_vm_with_label` and used to define `critical`.
     * `(cpu_frac_gt_60 >= THRESH_FRAC_GT_60)` **OR**
     * `(p95_max_cpu / 100.0 >= THRESH_P95)`.
 
-* **`strong_diurnal`**
+* **`periodicity_energy_24`**
+
+  * **Type:** `float64`
+  * **Definition:** fraction of FFT energy at the 24h frequency, using the hourly means vector.
+
+* **`periodicity_ratio_24_vs_8_12`**
+
+  * **Type:** `float64`
+  * **Definition:** `energy_24h / max(energy_12h, energy_8h)` from the same FFT.
+
+* **`periodic_enough`**
 
   * **Type:** `bool`
-  * **Definition:**
-
-    * `day_night_ratio >= THRESH_DAY_NIGHT_RATIO` **AND**
-    * `(day_cpu_mean / 100.0 >= THRESH_DAY_MEAN)`.
+  * **Definition:** `(periodicity_energy_24 >= PERIODICITY_MIN_ENERGY) AND (periodicity_ratio_24_vs_8_12 >= PERIODICITY_RATIO_8_12)`.
 
 * **`critical`**
 
   * **Type:** `int8`
   * **Values:** `{0, 1}`
-  * **Definition:** `(long_lived & sustained_high & strong_diurnal)` cast to int.
+  * **Definition:** `(periodic_enough AND (long_lived OR sustained_high))` cast to int.
   * **Role:** main supervised target.
 
 ---
@@ -521,10 +528,12 @@ Derived directly from this VM’s full life; **targets**, not inputs:
   Boolean flag (e.g. `lifetime_hours >= 24`).
 - `sustained_high`  
   Boolean: high `cpu_frac_gt_60` and/or high `p95_max_cpu`.
+- `periodic_enough`  
+  Boolean: 24h FFT energy dominates 12h/8h and clears a minimum energy floor.
 - `strong_diurnal`  
-  Boolean: strong `day_night_ratio` and high `day_cpu_mean`.
+  Legacy boolean: strong `day_night_ratio` and high `day_cpu_mean` (kept for analysis).
 - `critical`  
-  Final label: `1` if `long_lived & sustained_high & strong_diurnal`, else `0`.
+  Final label: `1` if `periodic_enough & (long_lived | sustained_high)`, else `0`.
 
 **Split metadata**
 

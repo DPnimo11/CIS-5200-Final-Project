@@ -168,10 +168,11 @@ Two-pass aggregation with progress bars:
 
   * `long_lived` from `lifetime_hours` (≥ `LONG_LIVED_HOURS`)
   * `sustained_high` from `cpu_frac_gt_60` and/or `p95_max_cpu`
-  * `strong_diurnal` from `day_night_ratio` and `day_cpu_mean`
+  * `periodic_enough` from the hourly CPU means (`cpu_hour_*_mean`), using a simple FFT energy ratio (24h vs 12h/8h)
+  * `strong_diurnal` (legacy, still kept) from `day_night_ratio` and `day_cpu_mean`
 * Defines binary label:
 
-  * `critical = (long_lived & sustained_high & strong_diurnal)` cast to `0/1`.
+  * `critical = periodic_enough & (long_lived | sustained_high)` cast to `0/1`.
 
 **Output**
 
@@ -186,7 +187,8 @@ Two-pass aggregation with progress bars:
   * `LONG_LIVED_HOURS` (default 24h)
   * `THRESH_FRAC_GT_60` (fraction of time with >60% CPU)
   * `THRESH_P95` (CPU p95 threshold; remember to divide percents by 100)
-  * `THRESH_DAY_NIGHT_RATIO`, `THRESH_DAY_MEAN`
+  * `PERIODICITY_MIN_ENERGY`, `PERIODICITY_RATIO_8_12` (24h energy dominance)
+  * `THRESH_DAY_NIGHT_RATIO`, `THRESH_DAY_MEAN` (legacy `strong_diurnal`, kept for analysis)
 * Changing these thresholds **directly changes** the positive rate of `critical` VMs.
 
 ---
